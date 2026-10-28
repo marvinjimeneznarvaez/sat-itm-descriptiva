@@ -1,0 +1,5 @@
+# Prototipo interno del SAT-ITM. No indexar.
+# Esto le pide a los buscadores que no incluyan el sitio en sus resultados.
+# No es un control de acceso: quien tenga el enlace entra igualmente.
+User-agent: *
+Disallow: /

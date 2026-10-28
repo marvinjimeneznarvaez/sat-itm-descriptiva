@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAT-ITM · Pruebas del tablero descriptivo</title>
+<link rel="stylesheet" href="../css/estilos.css">
+<style>
+  body { padding: 24px 32px; background: #F7F8FA; }
+  .caso { display: grid; grid-template-columns: 70px 1fr auto; gap: 12px;
+          padding: 6px 10px; border-bottom: 1px solid #DFE3E8; align-items: baseline;
+          font-size: 13px; }
+  .caso--ok   { background: #E4F2EE; }
+  .caso--fallo{ background: #FCEFE6; }
+  .marca { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .marca--ok    { color: #006B4F; }
+  .marca--fallo { color: #D55E00; }
+  .detalle { color: #5A6472; font-family: Consolas, monospace; font-size: 12px; }
+  .grupo { margin: 24px 0 8px; font-size: 15px; font-weight: 700; color: #0C215B;
+           border-bottom: 2px solid #0C215B; padding-bottom: 4px; }
+  #marcador { position: sticky; top: 0; background: #0C215B; color: #fff;
+              padding: 14px 18px; border-radius: 6px; font-size: 18px; font-weight: 700;
+              margin-bottom: 18px; z-index: 10; }
+</style>
+</head>
+<body>
+
+<h1>Pruebas del tablero descriptivo SAT-ITM</h1>
+<p style="max-width:80ch;color:#5A6472">
+  Prueban las funciones puras del motor de calculo, del formato, de las tablas y del CSV,
+  y despues hacen una prueba de integracion contra los datos publicados.
+  <b>Ningun caso usa datos reales de estudiantes:</b> los datos de las pruebas unitarias son
+  sinteticos, escritos a mano en este archivo.
+  Abra esta pagina servida por HTTP, igual que la aplicacion.
+</p>
+
+<div id="marcador">Ejecutando…</div>
+<div id="resultados"></div>
+
+<script src="../js/datos.js"></script>
+<script src="../js/filtros.js"></script>
+<script src="../js/tablas.js"></script>
+<script src="../js/graficos.js"></script>
+<script>
+(function () {
+  'use strict';
+  var pasadas = 0, fallidas = 0;
+  var res = document.getElementById('resultados');
+
+  function grupo(nombre) {
+    var d = document.createElement('div');
+    d.className = 'grupo'; d.textContent = nombre; res.appendChild(d);
+  }
+  function caso(nombre, fn) {
+    var ok = false, detalle = '';
+    try { detalle = fn(); ok = true; }
+    catch (e) { detalle = e.message; ok = false; }
+    ok ? pasadas++ : fallidas++;
+    var d = document.createElement('div');
+    d.className = 'caso ' + (ok ? 'caso--ok' : 'caso--fallo');
+    d.innerHTML = '<span class="marca marca--' + (ok ? 'ok' : 'fallo') + '">' +
+      (ok ? 'PASA' : 'FALLA') + '</span><span>' + nombre +
+      '</span><span class="detalle">' + (detalle || '') + '</span>';
+    res.appendChild(d);
+  }
+  function igual(a, b, msg) {
+    if (a !== b) throw new Error((msg || '') + ' esperado ' + JSON.stringify(b) + ', obtenido ' + JSON.stringify(a));
+    return 'valor = ' + JSON.stringify(a);
+  }
+  function cerca(a, b, tol, msg) {
+    tol = tol === undefined ? 1e-9 : tol;
+    if (a === null || Math.abs(a - b) > tol) {
+      throw new Error((msg || '') + ' esperado ' + b + ' ± ' + tol + ', obtenido ' + a);
+    }
+    return 'valor = ' + (typeof a === 'number' ? a.toFixed(4) : a);
+  }
+  function cierto(c, msg) { if (!c) throw new Error(msg || 'condicion falsa'); return 'si'; }
+
+  /* ===================================================================
+     Datos sinteticos de prueba. Inventados, no proceden de ningun registro.
+     =================================================================== */
+  var META = SAT.normalizaMeta({
+    version: 'prueba', periodos: ['2024-01', '2024-02', '2025-01'],
+    facultades: [{ id: 'FA', nombre: 'Facultad A' }, { id: 'FB', nombre: 'Facultad B' }],
+    programas: [
+      { id: 'P1', nombre: 'Programa 1', facultad: 0, nivel_formacion: 'Tecnologia' },
+      { id: 'P2', nombre: 'Programa 2', facultad: 1, nivel_formacion: 'Programa profesional' },
+      { id: '__suprimido__', nombre: 'Suprimido', facultad: 1, nivel_formacion: '(sin dato)' }
+    ],
+    modalidades: ['Presencial', 'Virtual'],
+    niveles: [1, 2, 3],
+    estados: ['MATRICULADO', 'AUSENTE', 'DESERTOR', 'REINGRESO', 'GRADUADO',
+              'EGRESADO_NO_GRADUADO', 'RIESGO_COMPETITIVO', 'SALIDA_INSTITUCIONAL',
+              'CENSURADO', 'NO_ETIQUETABLE'],
+    metodologias: [
+      { id: 'itm', nombre: 'ITM', estados_evento: ['AUSENTE'], desplazamiento_denominador: 0 },
+      { id: 'itm_desercion_anual', nombre: 'Tabla ITM', estados_evento: ['DESERTOR'], desplazamiento_denominador: 0 },
+      { id: 'spadies', nombre: 'SPADIES', estados_evento: ['DESERTOR'], desplazamiento_denominador: 0 }
+    ],
+    metodologias_en_filtro: ['itm', 'spadies'],
+    tratamientos: [
+      { id: 'fin_pensum', etiqueta: 'Fin de pensum',
+        opciones: ['excluir', 'incluir_denominador', 'incluir_ambos'], defecto: 'excluir' },
+      { id: 'bajo_rendimiento', etiqueta: 'Bajo rendimiento',
+        opciones: ['riesgo_competitivo', 'contar_desertor'], defecto: 'riesgo_competitivo' },
+      { id: 'suspension', etiqueta: 'Suspension',
+        opciones: ['permanece', 'contar_desertor'], defecto: 'permanece' },
+      { id: 'graduados', etiqueta: 'Graduados', opciones: ['excluir', 'incluir'], defecto: 'excluir' }
+    ],
+    indices: { suprimido_programa: 2 },
+    suprimido_umbral: 5
+  });
+
+  // metodologia, periodo, facultad, programa, modalidad, nivel, estado, n
+  var FILAS = [
+    [0, 0, 0, 0, 0, 0, 0, 800], [0, 0, 0, 0, 0, 0, 1, 200],
+    [0, 0, 1, 1, 1, 1, 0, 400], [0, 0, 1, 1, 1, 1, 1,  50],
+    [0, 1, 0, 0, 0, 0, 0, 900], [0, 1, 0, 0, 0, 0, 1, 100],
+    [0, 1, 1, 1, 1, 1, 0, 300], [0, 1, 1, 1, 1, 1, 1,  60],
+    [0, 2, 0, 0, 0, 0, 0, 100], [0, 2, 0, 0, 0, 0, 1,  20],
+    // Celdas suprimidas: centinelas en facultad, modalidad y nivel.
+    [0, 0, -1, 2, -1, -1, 1, 7],
+    // Particion spadies: desertores, con censura en el ultimo periodo.
+    [2, 0, 0, 0, 0, 0, 0, 900], [2, 0, 0, 0, 0, 0, 2, 100],
+    [2, 2, 0, 0, 0, 0, 0, 500], [2, 2, 0, 0, 0, 0, 8, 120],
+    // Otros estados, para los tratamientos.
+    [0, 0, 0, 0, 0, 1, 4, 40],  // GRADUADO
+    [0, 0, 0, 0, 0, 1, 5, 30],  // EGRESADO_NO_GRADUADO (fin de pensum)
+    [0, 0, 0, 0, 0, 1, 6, 25],  // RIESGO_COMPETITIVO
+    [0, 0, 0, 0, 0, 1, 7, 15]   // SALIDA_INSTITUCIONAL
+  ];
+  var HECHOS = { columnas: ['metodologia', 'periodo', 'facultad', 'programa', 'modalidad', 'nivel', 'estado', 'n'],
+    metodologia: [], periodo: [], facultad: [], programa: [], modalidad: [], nivel: [], estado: [], n: [] };
+  FILAS.forEach(function (f) {
+    HECHOS.metodologia.push(f[0]); HECHOS.periodo.push(f[1]); HECHOS.facultad.push(f[2]);
+    HECHOS.programa.push(f[3]); HECHOS.modalidad.push(f[4]); HECHOS.nivel.push(f[5]);
+    HECHOS.estado.push(f[6]); HECHOS.n.push(f[7]);
+  });
+
+  function nuevoEstado(cambios) {
+    var e = { meta: META, hechos: HECHOS, socio: { dimensiones: {}, cubos: {} } };
+    e.idx = SAT.indexa(META, HECHOS);
+    e.filtros = SAT.filtros.filtrosIniciales(META);
+    e.filtros.p0 = 0; e.filtros.p1 = META.periodos.length - 1;
+    Object.keys(cambios || {}).forEach(function (k) { e.filtros[k] = cambios[k]; });
+    SAT.filtros.recalcularDerivados(e);
+    return e;
+  }
+  function totalVentana(e, agr) {
+    var r = SAT.rollup(e, agr || 'ninguna');
+    var num = 0, den = 0;
+    for (var p = e.filtros.p0; p <= e.filtros.p1; p++) { num += r.num[0][p]; den += r.den[0][p]; }
+    return { num: num, den: den, tasa: SAT.tasa(num, den), r: r };
+  }
+
+  /* =================================================================== */
+  grupo('1 · Roles de estado segun fenomeno, metodologia y tratamientos');
+
+  caso('El evento lo declara la metodologia: ITM cuenta AUSENTE', function () {
+    var r = SAT.rolesEstados('ausentismo', {}, META.metodologias[0]);
+    cierto(r.AUSENTE.evento, 'AUSENTE deberia ser evento');
+    return igual(r.DESERTOR.evento, false, 'DESERTOR no es evento en ITM:');
+  });
+
+  caso('SPADIES cuenta DESERTOR y no AUSENTE', function () {
+    var r = SAT.rolesEstados('desercion', {}, META.metodologias[2]);
+    cierto(r.DESERTOR.evento, 'DESERTOR deberia ser evento');
+    return igual(r.AUSENTE.evento, false, 'AUSENTE no es evento en SPADIES:');
+  });
+
+  caso('CENSURADO queda fuera del numerador y del denominador', function () {
+    var r = SAT.rolesEstados('ausentismo', {}, META.metodologias[0]);
+    igual(r.CENSURADO.evento, false);
+    return igual(r.CENSURADO.denominador, false);
+  });
+
+  caso('NO_ETIQUETABLE permanece en el denominador', function () {
+    var r = SAT.rolesEstados('ausentismo', {}, META.metodologias[0]);
+    igual(r.NO_ETIQUETABLE.evento, false);
+    return igual(r.NO_ETIQUETABLE.denominador, true);
+  });
+
+  caso('Graduados: por defecto fuera del denominador, dentro si se pide', function () {
+    igual(SAT.rolesEstados('ausentismo', { graduados: 'excluir' }, META.metodologias[0]).GRADUADO.denominador, false);
+    return igual(SAT.rolesEstados('ausentismo', { graduados: 'incluir' }, META.metodologias[0]).GRADUADO.denominador, true);
+  });
+
+  caso('Fin de pensum: los tres tratamientos dan tres roles distintos', function () {
+    var a = SAT.rolesEstados('ausentismo', { fin_pensum: 'excluir' }, META.metodologias[0]).EGRESADO_NO_GRADUADO;
+    var b = SAT.rolesEstados('ausentismo', { fin_pensum: 'incluir_denominador' }, META.metodologias[0]).EGRESADO_NO_GRADUADO;
+    var c = SAT.rolesEstados('ausentismo', { fin_pensum: 'incluir_ambos' }, META.metodologias[0]).EGRESADO_NO_GRADUADO;
+    cierto(!a.denominador && !a.evento, 'excluir deberia dejarlo fuera de ambos');
+    cierto(b.denominador && !b.evento, 'incluir_denominador solo en el denominador');
+    cierto(c.denominador && c.evento, 'incluir_ambos en los dos');
+    return 'excluir / solo denominador / ambos';
+  });
+
+  caso('Bajo rendimiento: contar_desertor lo convierte en evento', function () {
+    igual(SAT.rolesEstados('desercion', { bajo_rendimiento: 'riesgo_competitivo' }, META.metodologias[2]).RIESGO_COMPETITIVO.evento, false);
+    return igual(SAT.rolesEstados('desercion', { bajo_rendimiento: 'contar_desertor' }, META.metodologias[2]).RIESGO_COMPETITIVO.evento, true);
+  });
+
+  caso('Permanencia es el complemento exacto del evento dentro del denominador', function () {
+    var a = SAT.rolesEstados('ausentismo', {}, META.metodologias[0]);
+    var p = SAT.rolesEstados('permanencia', {}, META.metodologias[0]);
+    var mal = META.estados.filter(function (e) {
+      return a[e].denominador && (p[e].evento === a[e].evento);
+    });
+    return igual(mal.length, 0, 'estados mal complementados: ' + mal.join(','));
+  });
+
+  /* =================================================================== */
+  grupo('2 · Seleccion de metodologia en el filtro');
+
+  caso('El selector solo ofrece las de metodologias_en_filtro', function () {
+    var c = SAT.clasificaMetodologias(META);
+    igual(c.ausentismo.join(','), 'itm');
+    return igual(c.desercion.join(','), 'spadies', 'itm_desercion_anual no debe estar en el selector:');
+  });
+
+  caso('La comparacion si incluye las tres metodologias publicadas', function () {
+    return igual(SAT.todasLasMetodologias(META).length, 3);
+  });
+
+  caso('Ausentismo y permanencia leen la particion del ausentismo', function () {
+    igual(SAT.particionPara(META, 'ausentismo', 'spadies'), 'itm');
+    return igual(SAT.particionPara(META, 'permanencia', 'spadies'), 'itm');
+  });
+
+  caso('Una metodologia forzada se puede leer aunque no este en el selector', function () {
+    return igual(SAT.particionPara(META, 'desercion', 'spadies', 'itm_desercion_anual'), 'itm_desercion_anual');
+  });
+
+  /* =================================================================== */
+  grupo('3 · Rollup: filtra por metodologia antes de sumar');
+
+  caso('Prueba de humo: no se mezclan las particiones', function () {
+    var e = nuevoEstado({ fenomeno: 'ausentismo' });
+    var t = totalVentana(e);
+    // Particion ITM: matriculados 800+400+900+300+100 = 2500; ausentes 200+50+100+60+20 = 430;
+    // riesgo 25 y salida 15 en el denominador; graduado y fin de pensum fuera.
+    // Sin filtro de dimension, los 7 ausentes de la celda suprimida SI cuentan.
+    igual(t.num, 430 + 7, 'numerador con los suprimidos:');
+    igual(t.den, 2500 + 430 + 25 + 15 + 7, 'denominador con los suprimidos:');
+    return cerca(t.tasa, 100 * 437 / 2977, 1e-9);
+  });
+
+  caso('Sin filtro, los grupos no publicables cuentan en el total', function () {
+    var r = SAT.rollup(nuevoEstado({ fenomeno: 'ausentismo' }), 'ninguna');
+    igual(r.suprimidas, 7, 'incluidos en el total:');
+    return igual(r.suprimidasFuera, 0, 'ninguno queda fuera sin filtros:');
+  });
+
+  caso('La particion SPADIES da otro numero con los mismos filtros', function () {
+    var e = nuevoEstado({ fenomeno: 'desercion', metodologia: 'spadies' });
+    var t = totalVentana(e);
+    igual(t.num, 100, 'desertores:');
+    return igual(t.den, 900 + 100 + 500, 'base (el censurado queda fuera):');
+  });
+
+  caso('Las celdas suprimidas suman al total pero no son una categoria', function () {
+    var e = nuevoEstado({ fenomeno: 'ausentismo' });
+    var r = SAT.rollup(e, 'facultad');
+    cierto(r.claves.indexOf('__no_publicable__') >= 0, 'deberia existir la categoria centinela');
+    var i = r.claves.indexOf('__no_publicable__');
+    igual(r.categorias[i], SAT.ETIQUETA_NO_PUBLICABLE, 'etiqueta legible:');
+    var mal = r.claves.filter(function (c) { return c === '-1' || c === -1; });
+    return igual(mal.length, 0, 'no debe aparecer una facultad «-1»:');
+  });
+
+  caso('Las facultades reales suman el total menos lo suprimido', function () {
+    var e = nuevoEstado({ fenomeno: 'ausentismo' });
+    var r = SAT.rollup(e, 'facultad');
+    var num = 0;
+    r.num.forEach(function (fila) { for (var p = 0; p < fila.length; p++) num += fila[p]; });
+    return igual(num, 430 + 7, 'incluye los 7 ausentes de la celda suprimida:');
+  });
+
+  caso('Filtrar por nivel excluye las celdas suprimidas (nivel -1)', function () {
+    var e = nuevoEstado({ fenomeno: 'ausentismo', niveles: [0] });
+    var t = totalVentana(e);
+    // Ausentes de nivel 1: 200 + 100 + 20. Los 7 suprimidos no tienen nivel y salen.
+    igual(t.num, 320, 'ausentes del nivel 1:');
+    return igual(t.r.suprimidasFuera, 7, 'suprimidos informados como excluidos:');
+  });
+
+  caso('Filtrar por modalidad Presencial deja solo el programa 1', function () {
+    var e = nuevoEstado({ fenomeno: 'ausentismo', modalidades: [0] });
+    var t = totalVentana(e);
+    return igual(t.num, 200 + 100 + 20, 'ausentes de la modalidad presencial:');
+  });
+
+  caso('Filtrar por una facultad restringe los programas', function () {
+    var e = nuevoEstado({ fenomeno: 'ausentismo', nivelAgregacion: 'una_facultad', facultadSel: 'FB' });
+    var t = totalVentana(e);
+    return igual(t.num, 50 + 60, 'solo el programa de la facultad B:');
+  });
+
+  caso('Con filtro de facultad, lo no publicable NO se suma a esa facultad', function () {
+    // El programa centinela figura en la facultad B. Si se contase, daria 117
+    // e inflaria esa facultad con estudiantes que podrian ser de cualquier otra.
+    var e = nuevoEstado({ fenomeno: 'ausentismo', nivelAgregacion: 'una_facultad', facultadSel: 'FB' });
+    var t = totalVentana(e);
+    igual(t.num, 110, 'no debe incluir los 7 ocultos:');
+    igual(t.r.suprimidas, 0, 'no se cuentan como incluidos:');
+    return igual(t.r.suprimidasFuera, 7, 'se informan como excluidos:');
+  });
+
+  caso('Comparar facultades no es un filtro: los no publicables siguen contando', function () {
+    var e = nuevoEstado({ fenomeno: 'ausentismo', nivelAgregacion: 'por_facultad' });
+    var r = SAT.rollup(e, 'facultad');
+    igual(r.suprimidasFuera, 0, 'comparar no restringe la poblacion:');
+    return igual(r.suprimidas, 7, 'y los 7 aparecen en su categoria etiquetada:');
+  });
+
+  caso('Cambiar el tratamiento de graduados cambia el denominador', function () {
+    var a = totalVentana(nuevoEstado({ fenomeno: 'ausentismo' }));
+    var e = nuevoEstado({ fenomeno: 'ausentismo' });
+    e.filtros.tratamientos.graduados = 'incluir';
+    var b = totalVentana(e);
+    igual(b.den - a.den, 40, 'los 40 graduados entran al denominador:');
+    return cierto(b.tasa < a.tasa, 'incluirlos deberia bajar la tasa');
+  });
+
+  caso('Contar el bajo rendimiento como evento sube la tasa', function () {
+    var a = totalVentana(nuevoEstado({ fenomeno: 'desercion', metodologia: 'spadies' }));
+    var e = nuevoEstado({ fenomeno: 'desercion', metodologia: 'spadies' });
+    e.filtros.tratamientos.bajo_rendimiento = 'contar_desertor';
+    var b = totalVentana(e);
+    return cierto(b.num >= a.num, 'el numerador no deberia bajar');
+  });
+
+  /* =================================================================== */
+  grupo('4 · Tasas, censura y dato faltante');
+
+  caso('Sin denominador la tasa es null, nunca cero', function () {
+    igual(SAT.tasa(0, 0), null);
+    return igual(SAT.tasa(5, 0), null);
+  });
+
+  caso('Cero eventos con censurados = sin confirmar, no 0 %', function () {
+    igual(SAT.tasaConCensura(0, 1000, 120), null, 'con censura deberia ser null:');
+    return cerca(SAT.tasaConCensura(0, 1000, 0), 0, 1e-9, 'sin censura si es un cero real:');
+  });
+
+  caso('El ultimo periodo de SPADIES queda sin confirmar', function () {
+    var e = nuevoEstado({ fenomeno: 'desercion', metodologia: 'spadies' });
+    var r = SAT.rollup(e, 'ninguna');
+    var ultimo = META.periodos.length - 1;
+    igual(r.num[0][ultimo], 0, 'no hay desertores confirmados:');
+    cierto(r.cen[0][ultimo] > 0, 'deberia haber censurados');
+    return igual(SAT.tasaConCensura(r.num[0][ultimo], r.den[0][ultimo], r.cen[0][ultimo]), null);
+  });
+
+  caso('Margen de error de una proporcion', function () {
+    var me = SAT.margenError(500, 1000);
+    return cerca(me, 100 * 1.96 * Math.sqrt(0.25 / 1000), 1e-9);
+  });
+
+  caso('Los decimales se ajustan a la n: con n<30 no hay decimales', function () {
+    igual(SAT.decimalesSegunN(10), 0);
+    igual(SAT.decimalesSegunN(500), 1);
+    return igual(SAT.decimalesSegunN(50000), 2);
+  });
+
+  caso('El porcentaje se formatea con coma decimal', function () {
+    return igual(SAT.fmt.pct(21.5432, 1000), '21,5 %');
+  });
+
+  caso('Un valor nulo se muestra como raya, no como cero', function () {
+    igual(SAT.fmt.pct(null, 100), '—');
+    return igual(SAT.fmt.num(null), '—');
+  });
+
+  /* =================================================================== */
+  grupo('5 · Deteccion de atipicos y anomalias conocidas');
+
+  caso('Detecta el hundimiento de un punto en una serie estable', function () {
+    var v = [17.2, 17.5, 7.2, 17.1, 17.4, 17.3, 17.6, 17.0];
+    var a = SAT.atipicosRobustos(v, 3);
+    igual(a.length, 1, 'deberia detectar uno:');
+    return igual(a[0].indice, 2, 'el indice del valor hundido:');
+  });
+
+  caso('No marca atipicos donde no los hay', function () {
+    return igual(SAT.atipicosRobustos([10, 11, 10.5, 10.2, 10.8, 11.1, 10.4], 3).length, 0);
+  });
+
+  caso('La anomalia de 2022-02 solo aplica a SPADIES', function () {
+    igual(SAT.anomaliasAplicables(['2022-01', '2022-02'], 'spadies').length, 1);
+    return igual(SAT.anomaliasAplicables(['2022-01', '2022-02'], 'itm').length, 0);
+  });
+
+  /* =================================================================== */
+  grupo('6 · Tablas, contingencia y correlaciones');
+
+  caso('Contingencia: totales por fila y por columna', function () {
+    var c = SAT.tablas.contingencia([[10, 90], [30, 70]]);
+    igual(c.total, 200);
+    igual(c.totalFila[0], 100);
+    return igual(c.totalCol[0], 40);
+  });
+
+  caso('Contingencia: porcentajes por fila y por columna', function () {
+    var c = SAT.tablas.contingencia([[10, 90], [30, 70]]);
+    cerca(c.pctFila[0][0], 10, 1e-9, '% de fila:');
+    return cerca(c.pctCol[0][0], 25, 1e-9, '% de columna:');
+  });
+
+  caso('Independencia perfecta da ji cuadrado y V de Cramer nulos', function () {
+    var c = SAT.tablas.contingencia([[20, 80], [20, 80]]);
+    cerca(c.chi2, 0, 1e-9);
+    return cerca(c.v, 0, 1e-9);
+  });
+
+  caso('Pearson detecta una relacion lineal perfecta', function () {
+    return cerca(SAT.tablas.pearson([1, 2, 3, 4, 5], [2, 4, 6, 8, 10]), 1, 1e-9);
+  });
+
+  caso('Spearman detecta una relacion monotona no lineal', function () {
+    var r = SAT.tablas.spearman([1, 2, 3, 4, 5], [1, 4, 9, 16, 25]);
+    var p = SAT.tablas.pearson([1, 2, 3, 4, 5], [1, 4, 9, 16, 25]);
+    cerca(r, 1, 1e-9, 'Spearman deberia ser 1:');
+    return cierto(p < 1, 'Pearson deberia ser menor que 1, y vale ' + p.toFixed(4));
+  });
+
+  caso('Los rangos promedian los empates', function () {
+    return igual(SAT.tablas.rangos([10, 20, 20, 30]).join(','), '1,2.5,2.5,4');
+  });
+
+  caso('La lectura verbal de r es coherente con su signo', function () {
+    cierto(SAT.tablas.interpretaR(-0.62).indexOf('negativa') >= 0, 'deberia decir negativa');
+    return cierto(SAT.tablas.interpretaR(0.05).indexOf('nula') >= 0, 'deberia decir nula');
+  });
+
+  /* =================================================================== */
+  grupo('7 · CSV');
+
+  caso('Separador punto y coma y coma decimal, para Excel en Colombia', function () {
+    var csv = SAT.tablas.aCSV(['a', 'b'], [['x', 1.5]]);
+    return igual(csv, 'a;b\r\nx;1,5');
+  });
+
+  caso('Los textos con punto y coma o comillas van entrecomillados', function () {
+    var csv = SAT.tablas.aCSV(['a'], [['di "hola"; adios']]);
+    return igual(csv, 'a\r\n"di ""hola""; adios"');
+  });
+
+  caso('Un nulo se escribe como celda vacia, no como cero', function () {
+    return igual(SAT.tablas.aCSV(['a', 'b'], [[null, 0]]), 'a;b\r\n;0');
+  });
+
+  /* =================================================================== */
+  grupo('8 · Resumen de filtros y estado derivado');
+
+  caso('El resumen nombra el fenomeno, la metodologia y la ventana', function () {
+    var e = nuevoEstado({ fenomeno: 'ausentismo' });
+    var txt = SAT.filtros.textoResumen(META, e.filtros).replace(/<[^>]+>/g, '');
+    cierto(txt.indexOf('Ausentismo') >= 0, 'deberia nombrar el fenomeno');
+    cierto(txt.indexOf('2024-01') >= 0 && txt.indexOf('2025-01') >= 0, 'deberia nombrar la ventana');
+    return txt.slice(0, 70) + '…';
+  });
+
+  caso('Reiniciar devuelve los tratamientos a su valor por defecto', function () {
+    var f = SAT.filtros.filtrosIniciales(META);
+    igual(f.tratamientos.fin_pensum, 'excluir');
+    return igual(f.tratamientos.bajo_rendimiento, 'riesgo_competitivo');
+  });
+
+  caso('El atajo del nivel 1 apunta al indice correcto', function () {
+    return igual(SAT.filtros.indiceNivel1(META), 0, 'niveles = [1,2,3], asi que el nivel 1 es el indice 0:');
+  });
+
+  /* =================================================================== */
+  grupo('9 · Combinacion de resumenes numericos');
+
+  caso('La media combinada es la media ponderada por n', function () {
+    var ci = { n: 0, media: 1, de: 2, min: 3, q1: 4, mediana: 5, q3: 6, max: 7, p05: 8, p95: 9 };
+    var g = SAT.combinarResumenes([[100, 3.0, 0.5, 0, 2, 3, 4, 5, 1, 4.5],
+                                   [300, 4.0, 0.5, 0, 3, 4, 5, 5, 2, 4.8]], ci);
+    igual(g.n, 400);
+    return cerca(g.media, (100 * 3 + 300 * 4) / 400, 1e-9);
+  });
+
+  caso('La desviacion combinada recoge la variacion entre grupos', function () {
+    var ci = { n: 0, media: 1, de: 2, min: 3, q1: 4, mediana: 5, q3: 6, max: 7, p05: 8, p95: 9 };
+    var g = SAT.combinarResumenes([[100, 3.0, 0.5, 0, 2, 3, 4, 5, 1, 4.5],
+                                   [100, 5.0, 0.5, 0, 4, 5, 6, 7, 3, 6.5]], ci);
+    return cierto(g.de > 0.5, 'la desviacion combinada (' + g.de.toFixed(3) +
+      ') debe superar la de cada grupo');
+  });
+
+  caso('El reagrupado de histogramas conserva el total de casos', function () {
+    var ci = { bordes: 0, conteos: 1 };
+    var c = SAT.combinarHistogramas([[[0, 1, 2], [10, 30]], [[1, 2, 3], [20, 40]]], ci);
+    var tot = c.conteos.reduce(function (a, b) { return a + b; }, 0);
+    return cerca(tot, 100, 1e-6);
+  });
+
+  /* =================================================================== */
+  grupo('10 · Integracion contra los datos publicados');
+
+  function finaliza() {
+    var m = document.getElementById('marcador');
+    m.textContent = fallidas === 0
+      ? 'TODAS LAS PRUEBAS PASAN · ' + pasadas + ' casos'
+      : fallidas + ' PRUEBA(S) FALLAN de ' + (pasadas + fallidas);
+    m.style.background = fallidas === 0 ? '#006B4F' : '#D55E00';
+    document.title = (fallidas === 0 ? 'OK ' : 'FALLA ') + document.title;
+  }
+
+  var base = null;
+  fetch('../datos/meta.json').then(function (r) {
+    if (!r.ok) throw new Error('no');
+    base = '../datos/'; return base;
+  }).catch(function () { base = '../datos-demo/'; return base; })
+  .then(function (b) {
+    return Promise.all(['meta.json', 'hechos.json'].map(function (a) {
+      return fetch(b + a).then(function (r) { return r.json(); });
+    }));
+  }).then(function (d) {
+    var meta = SAT.normalizaMeta(d[0]), hechos = d[1];
+    var e = { meta: meta, hechos: hechos, socio: {} };
+    e.idx = SAT.indexa(meta, hechos);
+    e.filtros = SAT.filtros.filtrosIniciales(meta);
+    e.filtros.p0 = 0; e.filtros.p1 = meta.periodos.length - 1;
+    e.filtros.fenomeno = 'ausentismo';
+    SAT.filtros.recalcularDerivados(e);
+
+    caso('Los datos cargan desde ' + base, function () {
+      cierto(meta.periodos.length > 0, 'deberia haber periodos');
+      return meta.periodos.length + ' periodos, ' + hechos.n.length + ' filas de hechos';
+    });
+
+    caso('Cada metodologia declara los estados que cuentan como evento', function () {
+      var sin = (meta.metodologias || []).filter(function (m) { return !m.estados_evento; });
+      return igual(sin.length, 0, 'metodologias sin estados_evento: ' +
+        sin.map(function (m) { return m.id; }).join(','));
+    });
+
+    var r = SAT.rollup(e, 'ninguna');
+    var ultimo = meta.periodos.length - 1;
+
+    caso('Prueba de humo del ultimo semestre (' + meta.periodos[ultimo] + ')', function () {
+      var num = r.num[0][ultimo], den = r.den[0][ultimo];
+      var t = SAT.tasaConCensura(num, den, r.cen[0][ultimo]);
+      cierto(den > 0, 'deberia haber base');
+      return 'ausentes ' + SAT.fmt.num(num) + ' / base ' + SAT.fmt.num(den) +
+        ' = ' + SAT.fmt.pct(t, den);
+    });
+
+    if (base.indexOf('datos-demo') < 0) {
+      caso('2025-02 · ausentismo ITM = 5.645 / 26.212 = 21,54 %', function () {
+        var ip = meta.periodos.indexOf('2025-02');
+        cierto(ip >= 0, 'deberia existir el periodo 2025-02');
+        igual(r.num[0][ip], 5645, 'ausentes:');
+        igual(r.den[0][ip], 26212, 'base:');
+        return cerca(SAT.tasa(r.num[0][ip], r.den[0][ip]), 21.54, 0.005);
+      });
+
+      caso('2020-01 · ausentismo ITM = 1.493 / 20.584 = 7,25 %', function () {
+        var ip = meta.periodos.indexOf('2020-01');
+        igual(r.num[0][ip], 1493, 'ausentes:');
+        igual(r.den[0][ip], 20584, 'base:');
+        return cerca(SAT.tasa(r.num[0][ip], r.den[0][ip]), 7.25, 0.005);
+      });
+
+      caso('Nivel 1 en 2025-02 ronda el 40,5 %', function () {
+        var i1 = SAT.filtros.indiceNivel1(meta);
+        var e2 = { meta: meta, hechos: hechos, socio: {}, idx: e.idx };
+        e2.filtros = SAT.filtros.filtrosIniciales(meta);
+        e2.filtros.fenomeno = 'ausentismo';
+        var ip = meta.periodos.indexOf('2025-02');
+        e2.filtros.p0 = ip; e2.filtros.p1 = ip; e2.filtros.niveles = [i1];
+        SAT.filtros.recalcularDerivados(e2);
+        var r2 = SAT.rollup(e2, 'ninguna');
+        var t = SAT.tasa(r2.num[0][ip], r2.den[0][ip]);
+        return cerca(t, 40.5, 0.3, 'tasa del nivel 1 (' + SAT.fmt.num(r2.num[0][ip]) + ' de ' +
+          SAT.fmt.num(r2.den[0][ip]) + '):');
+      });
+
+      caso('SPADIES deja sin confirmar los dos ultimos semestres', function () {
+        var e3 = { meta: meta, hechos: hechos, socio: {}, idx: e.idx };
+        e3.filtros = SAT.filtros.filtrosIniciales(meta);
+        e3.filtros.fenomeno = 'desercion'; e3.filtros.metodologia = 'spadies';
+        e3.filtros.p0 = 0; e3.filtros.p1 = ultimo;
+        SAT.filtros.recalcularDerivados(e3);
+        var r3 = SAT.rollup(e3, 'ninguna');
+        var t = SAT.tasaConCensura(r3.num[0][ultimo], r3.den[0][ultimo], r3.cen[0][ultimo]);
+        cierto(r3.cen[0][ultimo] > 0, 'deberia haber censurados en el ultimo periodo');
+        return igual(t, null, 'la tasa del ultimo periodo debe ser dato faltante:');
+      });
+
+      caso('Las tres metodologias dan cifras distintas con los mismos filtros', function () {
+        var vistos = {};
+        (meta.metodologias || []).forEach(function (m) {
+          var e4 = { meta: meta, hechos: hechos, socio: {}, idx: e.idx };
+          e4.filtros = SAT.filtros.filtrosIniciales(meta);
+          e4.filtros.p0 = 0; e4.filtros.p1 = ultimo;
+          e4.filtros.fenomeno = (m.estados_evento || []).indexOf('AUSENTE') >= 0 ? 'ausentismo' : 'desercion';
+          e4.filtros.metodologiaForzada = m.id;
+          SAT.filtros.recalcularDerivados(e4);
+          var r4 = SAT.rollup(e4, 'ninguna');
+          var num = 0, den = 0;
+          for (var p = 0; p <= ultimo; p++) { num += r4.num[0][p]; den += r4.den[0][p]; }
+          vistos[m.id] = SAT.fmt.pct(SAT.tasa(num, den), den);
+        });
+        var valores = Object.keys(vistos).map(function (k) { return vistos[k]; });
+        cierto(new Set(valores).size > 1, 'las tasas no deberian coincidir');
+        return Object.keys(vistos).map(function (k) { return k + ' = ' + vistos[k]; }).join(' · ');
+      });
+    }
+
+    caso('Ninguna categoria de facultad se llama «-1»', function () {
+      var rf = SAT.rollup(e, 'facultad');
+      var mal = rf.categorias.filter(function (c) { return String(c) === '-1'; });
+      return igual(mal.length, 0, 'categorias: ' + rf.categorias.join(' | '));
+    });
+
+    finaliza();
+  }).catch(function (err) {
+    caso('Carga de los datos publicados', function () { throw new Error(String(err)); });
+    finaliza();
+  });
+})();
+</script>
+</body>
+</html>
